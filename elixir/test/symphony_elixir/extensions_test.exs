@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.Redmine
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -36,6 +37,33 @@ defmodule SymphonyElixir.ExtensionsTest do
         _ ->
           Process.get({__MODULE__, :graphql_result})
       end
+    end
+  end
+
+  defmodule FakeRedmineClient do
+    def fetch_candidate_issues do
+      send(self(), :redmine_fetch_candidate_issues_called)
+      {:ok, [:redmine_candidate]}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:redmine_fetch_issues_by_states_called, states})
+      {:ok, states}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) do
+      send(self(), {:redmine_fetch_issue_states_by_ids_called, issue_ids})
+      {:ok, issue_ids}
+    end
+
+    def update_issue(issue_id, fields) do
+      send(self(), {:redmine_update_issue_called, issue_id, fields})
+      Process.get({__MODULE__, :update_result}, :ok)
+    end
+
+    def resolve_status_id(state_name) do
+      send(self(), {:redmine_resolve_status_id_called, state_name})
+      Process.get({__MODULE__, :status_result}, {:ok, 3})
     end
   end
 
@@ -181,7 +209,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     WorkflowStore.force_reload()
   end
 
-  test "tracker delegates to memory and linear adapters" do
+  test "tracker delegates to memory, redmine, and linear adapters" do
     issue = %Issue{id: "issue-1", identifier: "MT-1", state: "In Progress"}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue, %{id: "ignored"}])
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
@@ -203,6 +231,87 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    Application.put_env(:symphony_elixir, :redmine_client_module, FakeRedmineClient)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "redmine",
+      tracker_endpoint: "http://redmine.example.test",
+      tracker_api_token: "redmine-token"
+    )
+
+    assert Config.settings!().tracker.kind == "redmine"
+    assert SymphonyElixir.Tracker.adapter() == Redmine.Adapter
+    assert {:ok, [:redmine_candidate]} = SymphonyElixir.Tracker.fetch_candidate_issues()
+    assert {:ok, ["新建"]} = SymphonyElixir.Tracker.fetch_issues_by_states(["新建"])
+    assert {:ok, ["2099"]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["2099"])
+    assert :ok = SymphonyElixir.Tracker.create_comment("2099", "hello")
+    assert :ok = SymphonyElixir.Tracker.update_issue_state("2099", "已解决")
+    assert_receive :redmine_fetch_candidate_issues_called
+    assert_receive {:redmine_fetch_issues_by_states_called, ["新建"]}
+    assert_receive {:redmine_fetch_issue_states_by_ids_called, ["2099"]}
+    assert_receive {:redmine_update_issue_called, "2099", %{"notes" => "hello"}}
+    assert_receive {:redmine_resolve_status_id_called, "已解决"}
+    assert_receive {:redmine_update_issue_called, "2099", %{"status_id" => 3}}
+  end
+
+  test "redmine config uses REDMINE_URL and REDMINE_API_KEY defaults" do
+    old_url = System.get_env("REDMINE_URL")
+    old_key = System.get_env("REDMINE_API_KEY")
+    old_assignee = System.get_env("REDMINE_ASSIGNEE")
+
+    System.put_env("REDMINE_URL", "http://redmine.example.test/")
+    System.put_env("REDMINE_API_KEY", "redmine-key")
+    System.put_env("REDMINE_ASSIGNEE", "me")
+
+    on_exit(fn ->
+      restore_env("REDMINE_URL", old_url)
+      restore_env("REDMINE_API_KEY", old_key)
+      restore_env("REDMINE_ASSIGNEE", old_assignee)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "redmine",
+      tracker_endpoint: "https://api.linear.app/graphql",
+      tracker_api_token: "$REDMINE_API_KEY",
+      tracker_assignee: "$REDMINE_ASSIGNEE"
+    )
+
+    tracker = Config.settings!().tracker
+    assert tracker.endpoint == "http://redmine.example.test"
+    assert tracker.api_key == "redmine-key"
+    assert tracker.assignee == "me"
+    assert tracker.active_states == ["新建", "进行中", "反馈"]
+    assert tracker.terminal_states == ["已关闭", "已拒绝"]
+  end
+
+  test "redmine client normalizes and filters issues" do
+    issue =
+      Redmine.Client.normalize_issue_for_test(%{
+        "id" => 2099,
+        "subject" => "demo bug",
+        "description" => "broken",
+        "status" => %{"id" => 1, "name" => "新建"},
+        "priority" => %{"id" => 2, "name" => "普通"},
+        "project" => %{"id" => 1, "name" => "ThingsPanel"},
+        "tracker" => %{"id" => 1, "name" => "错误"},
+        "assigned_to" => %{"id" => 5, "name" => "张军宏"},
+        "created_on" => "2026-05-12T11:08:21Z",
+        "updated_on" => "2026-05-15T08:13:40Z"
+      })
+
+    assert issue.id == "2099"
+    assert issue.identifier == "RM-2099"
+    assert issue.title == "demo bug"
+    assert issue.state == "新建"
+    assert issue.assignee_id == "5"
+    assert "redmine" in issue.labels
+    assert "thingspanel" in issue.labels
+    assert "错误" in issue.labels
+    assert %DateTime{} = issue.updated_at
+
+    assert [^issue] = Redmine.Client.filter_issues_by_states_for_test([issue], [" 新建 "])
+    assert [] = Redmine.Client.filter_issues_by_states_for_test([issue], ["已关闭"])
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

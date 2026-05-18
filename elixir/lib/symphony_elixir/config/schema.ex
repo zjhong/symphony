@@ -366,11 +366,15 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp finalize_settings(settings) do
+    tracker_kind = settings.tracker.kind
+
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+      | endpoint: resolve_endpoint_setting(settings.tracker.endpoint, tracker_kind),
+        api_key: resolve_tracker_api_key(settings.tracker.api_key, tracker_kind),
+        assignee: resolve_tracker_assignee(settings.tracker.assignee, tracker_kind)
     }
+    |> normalize_redmine_defaults()
 
     workspace = %{
       settings.workspace
@@ -384,6 +388,62 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp resolve_endpoint_setting(endpoint, "redmine") do
+    endpoint =
+      if endpoint == "https://api.linear.app/graphql" do
+        "$REDMINE_URL"
+      else
+        endpoint
+      end
+
+    endpoint
+    |> resolve_setting_value(System.get_env("REDMINE_URL"))
+    |> normalize_secret_value()
+    |> trim_trailing_slash()
+  end
+
+  defp resolve_endpoint_setting(endpoint, _kind) do
+    endpoint
+    |> resolve_setting_value(nil)
+    |> normalize_secret_value()
+  end
+
+  defp resolve_tracker_api_key(api_key, "redmine"),
+    do: resolve_secret_setting(api_key, System.get_env("REDMINE_API_KEY"))
+
+  defp resolve_tracker_api_key(api_key, _kind),
+    do: resolve_secret_setting(api_key, System.get_env("LINEAR_API_KEY"))
+
+  defp resolve_tracker_assignee(assignee, "redmine"),
+    do: resolve_secret_setting(assignee, System.get_env("REDMINE_ASSIGNEE"))
+
+  defp resolve_tracker_assignee(assignee, _kind),
+    do: resolve_secret_setting(assignee, System.get_env("LINEAR_ASSIGNEE"))
+
+  defp normalize_redmine_defaults(%{kind: "redmine"} = tracker) do
+    tracker
+    |> maybe_replace_default_active_states(["新建", "进行中", "反馈"])
+    |> maybe_replace_default_terminal_states(["已关闭", "已拒绝"])
+  end
+
+  defp normalize_redmine_defaults(tracker), do: tracker
+
+  defp maybe_replace_default_active_states(tracker, replacement) do
+    if tracker.active_states == ["Todo", "In Progress"] do
+      %{tracker | active_states: replacement}
+    else
+      tracker
+    end
+  end
+
+  defp maybe_replace_default_terminal_states(tracker, replacement) do
+    if tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"] do
+      %{tracker | terminal_states: replacement}
+    else
+      tracker
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -416,7 +476,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp resolve_secret_setting(nil, fallback), do: normalize_secret_value(fallback)
 
   defp resolve_secret_setting(value, fallback) when is_binary(value) do
-    case resolve_env_value(value, fallback) do
+    case resolve_setting_value(value, fallback) do
       resolved when is_binary(resolved) -> normalize_secret_value(resolved)
       resolved -> resolved
     end
@@ -435,7 +495,9 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp resolve_env_value(value, fallback) when is_binary(value) do
+  defp resolve_setting_value(nil, fallback), do: fallback
+
+  defp resolve_setting_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do
       {:ok, env_name} ->
         case System.get_env(env_name) do
@@ -448,6 +510,9 @@ defmodule SymphonyElixir.Config.Schema do
         value
     end
   end
+
+  defp trim_trailing_slash(nil), do: nil
+  defp trim_trailing_slash(value) when is_binary(value), do: String.trim_trailing(value, "/")
 
   defp normalize_path_token(value) when is_binary(value) do
     case env_reference_name(value) do

@@ -34,6 +34,13 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+## Redmine Automation (Community Extension)
+
+This working branch includes a Redmine-oriented automation path (tracker adapter + cron runner) designed for teams that manage development tasks in Redmine.
+
+- English guide: [docs/redmine-track-automation.md](docs/redmine-track-automation.md)
+- 中文说明: [docs/redmine-track-automation.zh-CN.md](docs/redmine-track-automation.zh-CN.md)
+
 ---
 
 ## License

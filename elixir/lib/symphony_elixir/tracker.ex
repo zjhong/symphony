@@ -40,6 +40,7 @@ defmodule SymphonyElixir.Tracker do
   def adapter do
     case Config.settings!().tracker.kind do
       "memory" -> SymphonyElixir.Tracker.Memory
+      "redmine" -> SymphonyElixir.Redmine.Adapter
       _ -> SymphonyElixir.Linear.Adapter
     end
   end

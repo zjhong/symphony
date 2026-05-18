@@ -3,23 +3,38 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
-    assert [
-             %{
-               "description" => description,
-               "inputSchema" => %{
-                 "properties" => %{
-                   "query" => _,
-                   "variables" => _
-                 },
-                 "required" => ["query"],
-                 "type" => "object"
-               },
-               "name" => "linear_graphql"
-             }
-           ] = DynamicTool.tool_specs()
+  test "tool_specs advertises the linear and redmine input contracts" do
+    specs = DynamicTool.tool_specs()
 
-    assert description =~ "Linear"
+    assert %{
+             "description" => linear_description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "query" => _,
+                 "variables" => _
+               },
+               "required" => ["query"],
+               "type" => "object"
+             },
+             "name" => "linear_graphql"
+           } = Enum.find(specs, &(&1["name"] == "linear_graphql"))
+
+    assert %{
+             "description" => redmine_description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "issue_id" => _,
+                 "notes" => _,
+                 "status_name" => _
+               },
+               "required" => ["issue_id"],
+               "type" => "object"
+             },
+             "name" => "redmine_update_issue"
+           } = Enum.find(specs, &(&1["name"] == "redmine_update_issue"))
+
+    assert linear_description =~ "Linear"
+    assert redmine_description =~ "Redmine"
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +45,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "redmine_update_issue"]
              }
            }
 
@@ -306,5 +321,66 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert response["success"] == true
     assert response["output"] == ":ok"
+  end
+
+  test "redmine_update_issue resolves status and updates issue" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "redmine_update_issue",
+        %{"issue_id" => 2100, "notes" => "Done", "status_name" => "已解决"},
+        redmine_resolve_status_id: fn status_name ->
+          send(test_pid, {:resolve_status, status_name})
+          {:ok, 3}
+        end,
+        redmine_update_issue: fn issue_id, fields ->
+          send(test_pid, {:update_issue, issue_id, fields})
+          :ok
+        end
+      )
+
+    assert_received {:resolve_status, "已解决"}
+    assert_received {:update_issue, "2100", %{"notes" => "Done", "status_id" => 3}}
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == %{"issue_id" => "2100", "ok" => true}
+  end
+
+  test "redmine_update_issue validates required fields" do
+    missing_issue = DynamicTool.execute("redmine_update_issue", %{"notes" => "hello"})
+    assert missing_issue["success"] == false
+
+    assert Jason.decode!(missing_issue["output"]) == %{
+             "error" => %{
+               "message" => "`redmine_update_issue.issue_id` is required."
+             }
+           }
+
+    no_fields = DynamicTool.execute("redmine_update_issue", %{"issue_id" => "2100"})
+    assert no_fields["success"] == false
+
+    assert Jason.decode!(no_fields["output"]) == %{
+             "error" => %{
+               "message" => "`redmine_update_issue` requires notes or status_name."
+             }
+           }
+  end
+
+  test "redmine_update_issue preserves redmine failures" do
+    response =
+      DynamicTool.execute(
+        "redmine_update_issue",
+        %{"issue_id" => "2100", "status_name" => "不存在"},
+        redmine_resolve_status_id: fn _status_name -> {:error, :redmine_status_not_found} end
+      )
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "Redmine tool execution failed.",
+               "reason" => ":redmine_status_not_found"
+             }
+           }
   end
 end
